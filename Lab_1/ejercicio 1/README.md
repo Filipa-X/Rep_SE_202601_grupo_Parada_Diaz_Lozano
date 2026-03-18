@@ -1,0 +1,1 @@
+source ~/.bashrc && get_esp32 && idf.py build && idf.py -p /dev/ttyACM0 flash monitor
