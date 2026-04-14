@@ -7,10 +7,18 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+
 #include "esp_adc/adc_oneshot.h"
+
 #include "esp_dsp.h"
 
-#define MIC_ADC_CHANNEL     ADC_CHANNEL_3  
+#define SAMPLE_RATE   8000        // 4000, 8000, 16000
+#define FFT_SIZE      512         // 256, 512, 1024
+#define ADC_WIDTH     ADC_BITWIDTH_11  // 9,10,11,12
+
+#define MIC_ADC_CHANNEL     ADC_CHANNEL_3   // GPIO4
+
 #define MOTOR_IZQ_IN1       GPIO_NUM_17
 #define MOTOR_IZQ_IN2       GPIO_NUM_16
 #define MOTOR_DER_IN3       GPIO_NUM_7
@@ -21,9 +29,6 @@
 #define FREQ_IZQUIERDA      3000
 #define FREQ_DERECHA        4000
 #define FREQ_TOLERANCIA     499
-
-#define SAMPLE_RATE         8000
-#define FFT_SIZE            512
 
 static const char *TAG = "AUDIO_CAR";
 
@@ -40,7 +45,7 @@ void init_adc(void) {
     adc_oneshot_new_unit(&init_config, &adc_handle);
 
     adc_oneshot_chan_cfg_t config = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .bitwidth = ADC_WIDTH,
         .atten = ADC_ATTEN_DB_12,
     };
 
@@ -103,7 +108,6 @@ void sample_audio(float *buf, int n, int sample_rate_hz) {
 float detect_dominant_frequency(float *buf, int n, int sample_rate) {
 
     dsps_wind_hann_f32(wind, n);
-
     for (int i = 0; i < n; i++) {
         buf[i] *= wind[i];
     }
@@ -119,63 +123,61 @@ float detect_dominant_frequency(float *buf, int n, int sample_rate) {
     float max_mag = 0.0f;
     int max_idx = 0;
 
+    printf("SPECTRUM: ");
+
     for (int i = 1; i < n/2; i++) {
         float re = fft_buf[2*i];
         float im = fft_buf[2*i + 1];
         float mag = sqrtf(re*re + im*im);
 
-        if (mag > max_mag) {   // ✅ FIX IMPORTANTE
+        printf("%f,", mag);  
+
+        if (mag > max_mag) {
             max_mag = mag;
             max_idx = i;
         }
     }
+    printf("\n");
 
     float freq = (float)max_idx * sample_rate / n;
-
+    float df = (float)sample_rate / n;
     ESP_LOGI(TAG, "Freq: %.1f Hz", freq);
-
+    ESP_LOGI(TAG, "Resolution df: %.2f Hz", df);
     return freq;
 }
 
 void execute_command(float freq) {
-
     if (fabsf(freq - FREQ_ADELANTE) < FREQ_TOLERANCIA) {
         cmd_adelante();
-
     } else if (fabsf(freq - FREQ_ATRAS) < FREQ_TOLERANCIA) {
         cmd_atras();
-
     } else if (fabsf(freq - FREQ_IZQUIERDA) < FREQ_TOLERANCIA) {
         cmd_izquierda();
-
     } else if (fabsf(freq - FREQ_DERECHA) < FREQ_TOLERANCIA) {
         cmd_derecha();
-
     } else {
         cmd_stop();
     }
 }
 
 void audio_control_task(void *pvParam) {
-
     dsps_fft2r_init_fc32(NULL, FFT_SIZE);
 
     while (1) {
+        int64_t t_start = esp_timer_get_time();
         sample_audio(samples, FFT_SIZE, SAMPLE_RATE);
-
         float freq = detect_dominant_frequency(samples, FFT_SIZE, SAMPLE_RATE);
-
         execute_command(freq);
-
+        int64_t t_end = esp_timer_get_time();
+        float latency_ms = (t_end - t_start) / 1000.0;
+        ESP_LOGI(TAG, "Latency: %.2f ms", latency_ms);
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
 void app_main(void) {
     ESP_LOGI(TAG, "Sistema de control por audio iniciado");
-
     init_adc();
     init_gpio_motors();
-
     xTaskCreate(audio_control_task, "audio_ctrl", 8192, NULL, 5, NULL);
 }
